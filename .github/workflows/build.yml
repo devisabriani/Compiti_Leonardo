@@ -2,7 +2,7 @@ name: Build compiti.ics
 
 on:
   schedule:
-    - cron: "7 5 * * *"     # giornaliero 05:07 UTC
+    - cron: "7 5 * * *"
   workflow_dispatch:
 
 permissions:
@@ -14,6 +14,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
+          ref: main
           fetch-depth: 0
 
       - name: Set up Python
@@ -33,13 +34,24 @@ jobs:
           ARGO_PASSWORD: ${{ secrets.ARGO_PASSWORD }}
         run: |
           python build_homework_calendar.py
+          ls -la docs || true
 
       - name: Commit and push updated ICS
         run: |
+          set -e
+          test -f docs/compiti.ics || { echo "compiti.ics non esiste"; exit 0; }
+
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git pull --rebase
+
+          # Stato utile per debug
+          git status
+          git remote -v
+
+          # Evita conflitti
+          git pull --rebase origin main || true
+
           git add docs/compiti.ics
-          git diff --cached --quiet && echo "No changes" && exit 0
+          git diff --cached --quiet && { echo "No changes"; exit 0; }
           git commit -m "Update compiti.ics"
-          git push
+          git push origin HEAD:main
