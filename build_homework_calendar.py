@@ -2,14 +2,20 @@ import os, hashlib, datetime
 from pathlib import Path
 from argofamiglia import ArgoFamiglia  # pip install argofamiglia
 
-DAYS_AHEAD = 14
+# --- Configura qui ---
+DAYS_AHEAD = 14                 # quanti giorni in avanti
 CAL_NAME = "Compiti"
 OUTPUT_DIR = Path("docs")
 OUTPUT_FILE = OUTPUT_DIR / "compiti.ics"
 
-TIMETABLE = {}
+# Orario lezioni per materia (opzionale). Se assente -> evento "tutto il giorno".
+# Giorni: "Lun","Mar","Mer","Gio","Ven","Sab","Dom"
+TIMETABLE = {
+    # "Matematica": {"Lun": ("10:00","11:00"), "Gio": ("09:00","10:00")},
+}
 WEEKDAY_IT = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"]
 
+# --- Utility ---
 def esc(s: str) -> str:
     return s.replace("\\","\\\\").replace("\n","\\n").replace(",","\\,").replace(";","\\;")
 
@@ -64,31 +70,18 @@ def ics_event(date_obj, subject, text):
             "END:VEVENT\r\n"
         )
 
-def parse_date_key(k: str):
-    k = (k or "").strip()
-    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
-        try:
-            return datetime.datetime.strptime(k, fmt).date()
-        except ValueError:
-            pass
-    return None
-
-def merge_day(data, date_obj, events):
-    if not isinstance(data, dict):
-        return
-    materie = data.get("materie") or []
-    testi   = data.get("compiti") or []
-    for subject, text in zip(materie, testi):
-        if subject or text:
-            events.append(ics_event(date_obj, str(subject), str(text)))
-
-def safe_get_compiti(session, **kwargs):
+def fetch_day(session, d: datetime.date):
+    """
+    Chiama l’endpoint come nel tuo snippet e pesca SOLO il giorno d.
+    Prova entrambe le chiavi: 'YYYY-MM-DD' e 'DD/MM/YYYY'.
+    """
     try:
-        return session.getCompitiByDate(**kwargs) or {}
-    except TypeError:
-        return session.getCompitiByDate() or {}
+        data = session.getCompitiByDate() or {}
     except Exception:
-        return {}
+        return None
+    k1 = d.strftime("%Y-%m-%d")
+    k2 = d.strftime("%d/%m/%Y")
+    return data.get(k1) or data.get(k2)
 
 def main():
     session = ArgoFamiglia(
@@ -98,44 +91,21 @@ def main():
     )
 
     today = datetime.date.today()
-    end_date = today + datetime.timedelta(days=DAYS_AHEAD)
     events = []
 
-    # 1) Bulk
-    all_data = safe_get_compiti(
-        session,
-        start_date=today.strftime("%Y-%m-%d"),
-        end_date=end_date.strftime("%Y-%m-%d"),
-    )
-    # Log sintetico per capire la forma senza dati sensibili:
-    try:
-        print("all_data type:", type(all_data).__name__)
-        if isinstance(all_data, dict):
-            sample_keys = list(all_data.keys())[:10]
-            print("date keys sample:", sample_keys)
-    except Exception:
-        pass
-
-    covered = set()
-    if isinstance(all_data, dict):
-        for k, v in all_data.items():
-            d = parse_date_key(k)
-            if d and today <= d <= end_date:
-                merge_day(v, d, events)
-                covered.add(d)
-
-    # 2) Per-giorno per i buchi
-    total_days = (end_date - today).days + 1
-    for delta in range(total_days):
+    # Itera giorno per giorno come richiesto
+    for delta in range(DAYS_AHEAD + 1):
         d = today + datetime.timedelta(days=delta)
-        if d in covered:
+        compiti = fetch_day(session, d)
+        if not compiti:
             continue
-        daily = safe_get_compiti(session)
-        if isinstance(daily, dict):
-            hit = daily.get(d.strftime("%Y-%m-%d")) or daily.get(d.strftime("%d/%m/%Y"))
-            merge_day(hit, d, events)
 
-    # Scrivi ICS
+        materie = compiti.get("materie") or []
+        testi   = compiti.get("compiti") or []
+        for subject, text in zip(materie, testi):
+            if subject or text:
+                events.append(ics_event(d, str(subject), str(text)))
+
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUTPUT_FILE.open("w", encoding="utf-8") as f:
         f.write(ics_header())
@@ -143,5 +113,5 @@ def main():
             f.write(ev)
         f.write("END:VCALENDAR\r\n")
 
-    # Log finale minimale
-    print("VEVENT count:", sum(1 for _ in events))
+if __name__ == "__main__":
+    main()
