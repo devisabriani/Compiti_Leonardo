@@ -7,7 +7,7 @@ CAL_NAME = "Compiti"
 OUTPUT_DIR = Path("docs")
 OUTPUT_FILE = OUTPUT_DIR / "compiti.ics"
 
-TIMETABLE = {}  # opzionale: {"Matematica":{"Lun":("08:00","09:00")}, ...}
+TIMETABLE = {}
 WEEKDAY_IT = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"]
 
 def esc(s: str) -> str:
@@ -15,11 +15,10 @@ def esc(s: str) -> str:
 
 def uid_for(date_str, subject, text):
     raw = f"{date_str}|{subject}|{text}".encode("utf-8")
-    import hashlib
     return hashlib.sha256(raw).hexdigest()[:24] + "@compiti-argo"
 
 def dt_d(date):  return date.strftime("%Y%m%d")
-def dt_dt(date, hhmm):  return date.strftime("%Y%m%d") + "T" + hhmm.replace(":","") + "00"
+def dt_dt(date, hhmm):  return date.strftime("%Y%m%d") + "T" + hhmm.replace(":", "") + "00"
 
 def ics_header():
     return (
@@ -32,8 +31,8 @@ def ics_header():
     )
 
 def ics_event(date_obj, subject, text):
-    subject = subject.strip() if subject else ""
-    text = text.strip() if text else ""
+    subject = (subject or "").strip()
+    text = (text or "").strip()
     uid = uid_for(date_obj.strftime("%Y-%m-%d"), subject, text)
     weekday = WEEKDAY_IT[date_obj.weekday()]
     times = TIMETABLE.get(subject, {}).get(weekday)
@@ -66,23 +65,30 @@ def ics_event(date_obj, subject, text):
         )
 
 def parse_date_key(k: str):
-    # accetta 'YYYY-MM-DD' o 'DD/MM/YYYY'
-    k = k.strip()
+    k = (k or "").strip()
     for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
         try:
             return datetime.datetime.strptime(k, fmt).date()
         except ValueError:
-            continue
+            pass
     return None
 
 def merge_day(data, date_obj, events):
-    if not data: 
+    if not isinstance(data, dict):
         return
-    materie = data.get("materie", []) or []
-    testi   = data.get("compiti", []) or []
+    materie = data.get("materie") or []
+    testi   = data.get("compiti") or []
     for subject, text in zip(materie, testi):
         if subject or text:
             events.append(ics_event(date_obj, str(subject), str(text)))
+
+def safe_get_compiti(session, **kwargs):
+    try:
+        return session.getCompitiByDate(**kwargs) or {}
+    except TypeError:
+        return session.getCompitiByDate() or {}
+    except Exception:
+        return {}
 
 def main():
     session = ArgoFamiglia(
@@ -95,42 +101,41 @@ def main():
     end_date = today + datetime.timedelta(days=DAYS_AHEAD)
     events = []
 
-    # --- 1) tentativo bulk con intervallo ---
-    all_data = {}
+    # 1) Bulk
+    all_data = safe_get_compiti(
+        session,
+        start_date=today.strftime("%Y-%m-%d"),
+        end_date=end_date.strftime("%Y-%m-%d"),
+    )
+    # Log sintetico per capire la forma senza dati sensibili:
     try:
-        all_data = session.getCompitiByDate(
-            start_date=today.strftime("%Y-%m-%d"),
-            end_date=end_date.strftime("%Y-%m-%d")
-        ) or {}
-    except TypeError:
-        try:
-            all_data = session.getCompitiByDate() or {}
-        except Exception:
-            all_data = {}
+        print("all_data type:", type(all_data).__name__)
+        if isinstance(all_data, dict):
+            sample_keys = list(all_data.keys())[:10]
+            print("date keys sample:", sample_keys)
+    except Exception:
+        pass
 
-    # usa tutto ciò che ha date parsabili nell'intervallo
     covered = set()
-    for k, v in (all_data.items() if isinstance(all_data, dict) else []):
-        d = parse_date_key(k)
-        if d and today <= d <= end_date:
-            merge_day(v, d, events)
-            covered.add(d)
+    if isinstance(all_data, dict):
+        for k, v in all_data.items():
+            d = parse_date_key(k)
+            if d and today <= d <= end_date:
+                merge_day(v, d, events)
+                covered.add(d)
 
-    # --- 2) integrazione “per-giorno” se mancano giorni ---
-    for delta in range((end_date - today).days + 1):
+    # 2) Per-giorno per i buchi
+    total_days = (end_date - today).days + 1
+    for delta in range(total_days):
         d = today + datetime.timedelta(days=delta)
         if d in covered:
             continue
-        # fetch focalizzato
-        try:
-            daily = session.getCompitiByDate()  # alcune impl. ignorano parametri, ma rientriamo col dict
-        except Exception:
-            daily = None
+        daily = safe_get_compiti(session)
         if isinstance(daily, dict):
-            # prova con entrambe le chiavi
             hit = daily.get(d.strftime("%Y-%m-%d")) or daily.get(d.strftime("%d/%m/%Y"))
             merge_day(hit, d, events)
 
+    # Scrivi ICS
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUTPUT_FILE.open("w", encoding="utf-8") as f:
         f.write(ics_header())
@@ -138,5 +143,5 @@ def main():
             f.write(ev)
         f.write("END:VCALENDAR\r\n")
 
-if __name__ == "__main__":
-    main()
+    # Log finale minimale
+    print("VEVENT count:", sum(1 for _ in events))
