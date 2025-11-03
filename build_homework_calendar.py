@@ -1,34 +1,31 @@
 import os, hashlib, datetime
 from pathlib import Path
+from argofamiglia import ArgoFamiglia  # pip install argofamiglia
 
-# pip install argofamiglia
-from argofamiglia import ArgoFamiglia
-
-# --- Configurazione di base ---
-DAYS_AHEAD = 14               # quanti giorni in avanti
+# --- Config ---
+DAYS_AHEAD = 14                 # orizzonte in giorni
 CAL_NAME = "Compiti"
 OUTPUT_DIR = Path("docs")
 OUTPUT_FILE = OUTPUT_DIR / "compiti.ics"
 
-# Opzionale: mappatura materia → orario lezione (ora locale di Milano)
-# Se non definita per una materia, evento "tutto il giorno".
-# Formato: "Lun","Mar","Mer","Gio","Ven","Sab","Dom"
+# Orario lezioni per materia (opzionale). Se assente -> evento "tutto il giorno".
+# Giorni: "Lun","Mar","Mer","Gio","Ven","Sab","Dom"
 TIMETABLE = {
-    # Esempi:
     # "Matematica": {"Lun": ("10:00","11:00"), "Gio": ("09:00","10:00")},
     # "Italiano":   {"Mar": ("08:00","09:00")}
 }
-
 WEEKDAY_IT = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"]
 
+# --- Util ---
 def uid_for(date_str, subject, text):
     raw = f"{date_str}|{subject}|{text}".encode("utf-8")
     return hashlib.sha256(raw).hexdigest()[:24] + "@compiti-argo"
 
-def dt(date, t=None):
-    if t is None:
-        return date.strftime("%Y%m%d")
-    return date.strftime("%Y%m%d") + "T" + t.replace(":","") + "00"
+def dt_d(date):
+    return date.strftime("%Y%m%d")
+
+def dt_dt(date, hhmm):
+    return date.strftime("%Y%m%d") + "T" + hhmm.replace(":", "") + "00"
 
 def ics_header():
     return (
@@ -40,22 +37,21 @@ def ics_header():
         "METHOD:PUBLISH\r\n"
     )
 
+def esc(s: str) -> str:
+    return s.replace("\\", "\\\\").replace("\n", "\\n").replace(",", "\\,").replace(";", "\\;")
+
 def ics_event(date_obj, subject, text):
     date_str = date_obj.strftime("%Y-%m-%d")
     uid = uid_for(date_str, subject, text)
     weekday = WEEKDAY_IT[date_obj.weekday()]
     times = TIMETABLE.get(subject, {}).get(weekday)
 
-    # Escape minimale per ICS
-    def esc(s): 
-        return s.replace("\\","\\\\").replace("\n","\\n").replace(",","\\,").replace(";","\\;")
-
-    summary = esc(f"{subject} — Compiti")
-    description = esc(text)
+    summary = esc(f"{subject} — Compiti") if subject else "Compiti"
+    description = esc(text) if text else ""
 
     if times:
-        start = dt(date_obj, times[0])
-        end   = dt(date_obj, times[1])
+        start = dt_dt(date_obj, times[0])
+        end   = dt_dt(date_obj, times[1])
         return (
             "BEGIN:VEVENT\r\n"
             f"UID:{uid}\r\n"
@@ -67,10 +63,8 @@ def ics_event(date_obj, subject, text):
             "END:VEVENT\r\n"
         )
     else:
-        # Evento "tutto il giorno"
-        start = dt(date_obj)
-        # DTEND esclusivo: giorno successivo
-        end = dt(date_obj + datetime.timedelta(days=1))
+        start = dt_d(date_obj)
+        end = dt_d(date_obj + datetime.timedelta(days=1))  # DTEND esclusivo
         return (
             "BEGIN:VEVENT\r\n"
             f"UID:{uid}\r\n"
@@ -83,6 +77,7 @@ def ics_event(date_obj, subject, text):
         )
 
 def main():
+    # Credenziali dai Secrets di GitHub
     school = os.environ["ARGO_SCHOOL_CODE"]
     user   = os.environ["ARGO_USERNAME"]
     pwd    = os.environ["ARGO_PASSWORD"]
@@ -90,28 +85,37 @@ def main():
     session = ArgoFamiglia(school, user, pwd)
 
     today = datetime.date.today()
+    end_date = today + datetime.timedelta(days=DAYS_AHEAD)
     all_events = []
 
-    # La libreria espone getCompitiByDate(); iteriamo giorno per giorno
-    for delta in range(DAYS_AHEAD + 1):
-        d = today + datetime.timedelta(days=delta)
-        key = d.strftime("%Y-%m-%d")
-        try:
-            compiti = session.getCompitiByDate().get(key)
-        except Exception:
-            compiti = None
+    # Scarica una volta sola. Alcune versioni accettano start/end, altre no.
+    try:
+        all_data = session.getCompitiByDate(
+            start_date=today.strftime("%Y-%m-%d"),
+            end_date=end_date.strftime("%Y-%m-%d")
+        )
+    except TypeError:
+        all_data = session.getCompitiByDate()
 
-        if not compiti:
+    # Debug opzionale:
+    # print("Date compiti:", ", ".join(sorted(all_data.keys())))
+
+    for date_str, compiti in sorted(all_data.items()):
+        try:
+            d = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
+        except ValueError:
+            continue
+        if not (today <= d <= end_date):
             continue
 
-        # Struttura attesa: compiti["materie"], compiti["compiti"]
-        materie = compiti.get("materie", [])
-        testi   = compiti.get("compiti", [])
-        n = min(len(materie), len(testi))
-        for i in range(n):
-            subject = str(materie[i]).strip()
-            text    = str(testi[i]).strip()
-            all_events.append(ics_event(d, subject, text))
+        materie = compiti.get("materie", []) or []
+        testi   = compiti.get("compiti", []) or []
+
+        for subject, text in zip(materie, testi):
+            subject = str(subject).strip()
+            text    = str(text).strip()
+            if subject or text:
+                all_events.append(ics_event(d, subject, text))
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUTPUT_FILE.open("w", encoding="utf-8") as f:
