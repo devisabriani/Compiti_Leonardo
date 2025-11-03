@@ -2,30 +2,24 @@ import os, hashlib, datetime
 from pathlib import Path
 from argofamiglia import ArgoFamiglia  # pip install argofamiglia
 
-# --- Config ---
-DAYS_AHEAD = 14                 # orizzonte in giorni
+DAYS_AHEAD = 14
 CAL_NAME = "Compiti"
 OUTPUT_DIR = Path("docs")
 OUTPUT_FILE = OUTPUT_DIR / "compiti.ics"
 
-# Orario lezioni per materia (opzionale). Se assente -> evento "tutto il giorno".
-# Giorni: "Lun","Mar","Mer","Gio","Ven","Sab","Dom"
-TIMETABLE = {
-    # "Matematica": {"Lun": ("10:00","11:00"), "Gio": ("09:00","10:00")},
-    # "Italiano":   {"Mar": ("08:00","09:00")}
-}
+TIMETABLE = {}  # opzionale: {"Matematica":{"Lun":("08:00","09:00")}, ...}
 WEEKDAY_IT = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"]
 
-# --- Util ---
+def esc(s: str) -> str:
+    return s.replace("\\","\\\\").replace("\n","\\n").replace(",","\\,").replace(";","\\;")
+
 def uid_for(date_str, subject, text):
     raw = f"{date_str}|{subject}|{text}".encode("utf-8")
+    import hashlib
     return hashlib.sha256(raw).hexdigest()[:24] + "@compiti-argo"
 
-def dt_d(date):
-    return date.strftime("%Y%m%d")
-
-def dt_dt(date, hhmm):
-    return date.strftime("%Y%m%d") + "T" + hhmm.replace(":", "") + "00"
+def dt_d(date):  return date.strftime("%Y%m%d")
+def dt_dt(date, hhmm):  return date.strftime("%Y%m%d") + "T" + hhmm.replace(":","") + "00"
 
 def ics_header():
     return (
@@ -37,21 +31,17 @@ def ics_header():
         "METHOD:PUBLISH\r\n"
     )
 
-def esc(s: str) -> str:
-    return s.replace("\\", "\\\\").replace("\n", "\\n").replace(",", "\\,").replace(";", "\\;")
-
 def ics_event(date_obj, subject, text):
-    date_str = date_obj.strftime("%Y-%m-%d")
-    uid = uid_for(date_str, subject, text)
+    subject = subject.strip() if subject else ""
+    text = text.strip() if text else ""
+    uid = uid_for(date_obj.strftime("%Y-%m-%d"), subject, text)
     weekday = WEEKDAY_IT[date_obj.weekday()]
     times = TIMETABLE.get(subject, {}).get(weekday)
-
     summary = esc(f"{subject} — Compiti") if subject else "Compiti"
-    description = esc(text) if text else ""
+    description = esc(text)
 
     if times:
-        start = dt_dt(date_obj, times[0])
-        end   = dt_dt(date_obj, times[1])
+        start = dt_dt(date_obj, times[0]); end = dt_dt(date_obj, times[1])
         return (
             "BEGIN:VEVENT\r\n"
             f"UID:{uid}\r\n"
@@ -63,8 +53,7 @@ def ics_event(date_obj, subject, text):
             "END:VEVENT\r\n"
         )
     else:
-        start = dt_d(date_obj)
-        end = dt_d(date_obj + datetime.timedelta(days=1))  # DTEND esclusivo
+        start = dt_d(date_obj); end = dt_d(date_obj + datetime.timedelta(days=1))
         return (
             "BEGIN:VEVENT\r\n"
             f"UID:{uid}\r\n"
@@ -76,51 +65,76 @@ def ics_event(date_obj, subject, text):
             "END:VEVENT\r\n"
         )
 
-def main():
-    # Credenziali dai Secrets di GitHub
-    school = os.environ["ARGO_SCHOOL_CODE"]
-    user   = os.environ["ARGO_USERNAME"]
-    pwd    = os.environ["ARGO_PASSWORD"]
+def parse_date_key(k: str):
+    # accetta 'YYYY-MM-DD' o 'DD/MM/YYYY'
+    k = k.strip()
+    for fmt in ("%Y-%m-%d", "%d/%m/%Y"):
+        try:
+            return datetime.datetime.strptime(k, fmt).date()
+        except ValueError:
+            continue
+    return None
 
-    session = ArgoFamiglia(school, user, pwd)
+def merge_day(data, date_obj, events):
+    if not data: 
+        return
+    materie = data.get("materie", []) or []
+    testi   = data.get("compiti", []) or []
+    for subject, text in zip(materie, testi):
+        if subject or text:
+            events.append(ics_event(date_obj, str(subject), str(text)))
+
+def main():
+    session = ArgoFamiglia(
+        os.environ["ARGO_SCHOOL_CODE"],
+        os.environ["ARGO_USERNAME"],
+        os.environ["ARGO_PASSWORD"],
+    )
 
     today = datetime.date.today()
     end_date = today + datetime.timedelta(days=DAYS_AHEAD)
-    all_events = []
+    events = []
 
-    # Scarica una volta sola. Alcune versioni accettano start/end, altre no.
+    # --- 1) tentativo bulk con intervallo ---
+    all_data = {}
     try:
         all_data = session.getCompitiByDate(
             start_date=today.strftime("%Y-%m-%d"),
             end_date=end_date.strftime("%Y-%m-%d")
-        )
+        ) or {}
     except TypeError:
-        all_data = session.getCompitiByDate()
-
-    # Debug opzionale:
-    # print("Date compiti:", ", ".join(sorted(all_data.keys())))
-
-    for date_str, compiti in sorted(all_data.items()):
         try:
-            d = datetime.datetime.strptime(date_str, "%Y-%m-%d").date()
-        except ValueError:
-            continue
-        if not (today <= d <= end_date):
-            continue
+            all_data = session.getCompitiByDate() or {}
+        except Exception:
+            all_data = {}
 
-        materie = compiti.get("materie", []) or []
-        testi   = compiti.get("compiti", []) or []
+    # usa tutto ciò che ha date parsabili nell'intervallo
+    covered = set()
+    for k, v in (all_data.items() if isinstance(all_data, dict) else []):
+        d = parse_date_key(k)
+        if d and today <= d <= end_date:
+            merge_day(v, d, events)
+            covered.add(d)
 
-        for subject, text in zip(materie, testi):
-            subject = str(subject).strip()
-            text    = str(text).strip()
-            if subject or text:
-                all_events.append(ics_event(d, subject, text))
+    # --- 2) integrazione “per-giorno” se mancano giorni ---
+    for delta in range((end_date - today).days + 1):
+        d = today + datetime.timedelta(days=delta)
+        if d in covered:
+            continue
+        # fetch focalizzato
+        try:
+            daily = session.getCompitiByDate()  # alcune impl. ignorano parametri, ma rientriamo col dict
+        except Exception:
+            daily = None
+        if isinstance(daily, dict):
+            # prova con entrambe le chiavi
+            hit = daily.get(d.strftime("%Y-%m-%d")) or daily.get(d.strftime("%d/%m/%Y"))
+            merge_day(hit, d, events)
 
     OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     with OUTPUT_FILE.open("w", encoding="utf-8") as f:
         f.write(ics_header())
-        for ev in all_events:
+        for ev in events:
             f.write(ev)
         f.write("END:VCALENDAR\r\n")
 
