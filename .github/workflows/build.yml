@@ -1,57 +1,37 @@
-name: Build compiti.ics
-
-on:
-  schedule:
-    - cron: "7 5 * * *"
-  workflow_dispatch:
-
-permissions:
-  contents: write
-
-jobs:
-  build:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: main
-          fetch-depth: 0
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.11"
-
-      - name: Install dependencies
-        run: |
-          python -m pip install --upgrade pip
-          pip install argofamiglia
-
-      - name: Build ICS
+      - name: Build ICS (debug-safe)
         env:
           ARGO_SCHOOL_CODE: ${{ secrets.ARGO_SCHOOL_CODE }}
           ARGO_USERNAME: ${{ secrets.ARGO_USERNAME }}
           ARGO_PASSWORD: ${{ secrets.ARGO_PASSWORD }}
         run: |
-          python build_homework_calendar.py
-          ls -la docs || true
-
-      - name: Commit and push updated ICS
-        run: |
           set -e
-          test -f docs/compiti.ics || { echo "compiti.ics non esiste"; exit 0; }
+          python - <<'PY'
+          import os, sys, traceback
+          from pathlib import Path
 
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
+          print("Python:", sys.version)
+          print("Env present:", all(k in os.environ for k in ["ARGO_SCHOOL_CODE","ARGO_USERNAME","ARGO_PASSWORD"]))
 
-          # Stato utile per debug
-          git status
-          git remote -v
+          try:
+              import argofamiglia
+              print("argofamiglia version:", getattr(argofamiglia, "__version__", "unknown"))
+          except Exception as e:
+              print("Import argofamiglia FAILED:", e)
+              raise
 
-          # Evita conflitti
-          git pull --rebase origin main || true
-
-          git add docs/compiti.ics
-          git diff --cached --quiet && { echo "No changes"; exit 0; }
-          git commit -m "Update compiti.ics"
-          git push origin HEAD:main
+          # esegui lo script vero e proprio
+          import build_homework_calendar
+          try:
+              build_homework_calendar.main()
+              print("Script OK")
+          except Exception as e:
+              print("Script FAILED:", e)
+              traceback.print_exc()
+              # crea comunque docs/compiti.ics minimale, così puoi verificarne l'esistenza
+              Path("docs").mkdir(parents=True, exist_ok=True)
+              Path("docs/compiti.ics").write_text(
+                  "BEGIN:VCALENDAR\r\nEND:VCALENDAR\r\n", encoding="utf-8"
+              )
+              # esci con codice 1 per vedere il traceback in Actions
+              sys.exit(1)
+          PY
