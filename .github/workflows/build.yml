@@ -2,8 +2,10 @@ name: Build & deploy compiti.ics
 
 on:
   schedule:
-    - cron: "7 5 * * *"     # giornaliero 05:07 UTC
+    - cron: "7 5,11,17,23 * * *"   # 4 volte al giorno (UTC): ~06:07, 12:07, 18:07, 00:07 Europe/Rome
   workflow_dispatch:
+  push:
+    branches: [ main ]              # se modifichi lo script, parte subito
 
 permissions:
   contents: read
@@ -38,12 +40,12 @@ jobs:
           ARGO_PASSWORD: ${{ secrets.ARGO_PASSWORD }}
         run: |
           python build_homework_calendar.py
-          ls -la docs
+          echo "VEVENT count:" $(grep -c '^BEGIN:VEVENT' docs/compiti.ics || true)
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./docs   # pubblica esattamente la cartella docs (dove c'è compiti.ics)
+          path: ./docs
 
   deploy:
     needs: build
