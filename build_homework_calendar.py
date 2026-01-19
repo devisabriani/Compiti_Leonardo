@@ -6,7 +6,7 @@ from argofamiglia import ArgoFamiglia  # pip install argofamiglia
 DAYS_AHEAD = 21
 CAL_NAME = "Compiti"
 OUTPUT_DIR = Path("docs")
-OUTPUT_FILE = OUTPUT_DIR / "compiti.ics"
+OUTPUT_FILE = OUTPUT_DIR / "compiti_v2.ics"
 WEEKDAY_IT = ["Lun","Mar","Mer","Gio","Ven","Sab","Dom"]
 
 # ---- Utils ----
